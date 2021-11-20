@@ -2,9 +2,6 @@ const { BiboxFuturesUSDTClient, TimeInterval } = require( "../../biboxFuturesUSD
 const client = new BiboxFuturesUSDTClient();
 
 subscribeCandlestick = () => {
-    client.subscribeCandlestick( "BTC_USDT", TimeInterval.ONE_MINUTE, ( data ) => {
-        console.log( "BTC_USDT", data );
-    } );
 
     client.subscribeCandlestick( "ETH_USDT", TimeInterval.ONE_MINUTE, ( data ) => {
         console.log( "ETH_USDT", data );

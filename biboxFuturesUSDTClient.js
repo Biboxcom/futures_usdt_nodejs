@@ -33,7 +33,7 @@ const defaultConfig = {
     apiKey: "",
     secretKey: "",
     restHost: "https://api.bibox.com",
-    wssHost: "wss://push.bibox.me/cbu"
+    wssHost: "wss://npush.bibox360.com/cbu"
 };
 
 const MarketUrl = {
@@ -77,6 +77,7 @@ const TimeInterval = Object.freeze( {
     WEEKLY: "week"
 } );
 
+// eslint-disable-next-line no-unused-vars
 const OrderType = Object.freeze( {
     MARKET: "MARKET",
     LIMIT: "LIMIT"
@@ -168,6 +169,7 @@ const ApiMarginMode = Object.freeze( {
     }
 } );
 
+// eslint-disable-next-line no-unused-vars
 const ApiOrderType = Object.freeze( {
     MARKET: 1,
     LIMIT: 2
@@ -266,8 +268,7 @@ class BiboxFuturesClientBase {
         emitter.on( "unsub_channel", ( channel ) => {
             if ( channel && this._subscriptions[channel] ) {
                 this._wss.send( JSON.stringify( {
-                    "channel": this._subscriptions.getChannel(),
-                    "event": "removeChannel"
+                    "unsub": this._subscriptions.getChannel(),
                 } ) );
                 delete this._subscriptions[channel];
             }
@@ -275,8 +276,7 @@ class BiboxFuturesClientBase {
 
         emitter.on( "unsub_private_channel", ( channel ) => {
             this._wss.send( JSON.stringify( {
-                "channel": this._subscriptions.getChannel(),
-                "event": "removeChannel"
+                "unsub": this._subscriptions.getChannel(),
             } ) );
             for ( let key of Object.keys( this._subscriptions ) ) {
                 if ( key.indexOf( channel ) !== -1 ) {
@@ -320,12 +320,24 @@ class BiboxFuturesClientBase {
         }, 60000 );
     };
 
+    _loopPing = () => {
+        if ( this._keepLive ) {
+            clearTimeout( this._keepLive );
+        }
+
+        this._keepLive = setTimeout( () => {
+            this._wss.ping( new Date().getTime() );
+            this._loopPing();
+        }, 20000 );
+    };
+
     _initWss = () => {
         if ( !this._wss ) {
             this._wss = new WebSocket( this._wssHost );
             this._wss.on( "open", () => {
                 this._onWebSocketOpen();
                 emitter.emit( "sub_channel" );
+                this._loopPing();
             } );
 
             this._wss.on( "close", () => {
@@ -341,35 +353,55 @@ class BiboxFuturesClientBase {
             } );
 
             this._wss.on( "message", ( message ) => {
-                if ( !this._isArrMsg( message ) ) return;
-                let dataArr = JSON.parse( message );
-                for ( const data of dataArr ) {
-                    let channel = data.channel;
+                message = this._decodeBytes( message );
+                if ( this._isObj( message ) ) {
+                    let data = JSON.parse( message );
+                    let channel = data.topic;
                     if ( !channel ) {
                         return;
                     }
-
                     if ( PrivateSubscription.CHANNEL_PREFIX === channel ) {
                         for ( let psub of Object.values( this._subscriptions ) ) {
-                            let pdata = data.data[psub.getDataName()];
+                            let pdata = data.d[psub.getDataName()];
                             if ( pdata ) {
                                 psub.onMessage( pdata );
-                                break;
+                                return;
                             }
                         }
-                        continue;
+                        return;
                     }
-
 
                     let sub = this._subscriptions[channel];
-                    if ( !sub ) {
-                        continue;
+                    if ( sub ) {
+                        sub.onMessage( data.d );
                     }
-                    sub.onMessage( data.data );
+
                 }
             } );
         }
     };
+
+    _decodeBytes = ( array ) => {
+        let zipFlag = array[0];
+        let offset = 1;
+        let length = array.length - offset;
+        if ( !zipFlag ) {
+            return array.toString( 'utf-8', offset, length );
+        }else if ( zipFlag === 1 ) {
+            return this._ungZip( array, offset );
+        }else {
+            let unknow = array.toString( 'utf-8', 0, length );
+            if ( unknow.includes( "error" ) ) {
+                console.log( unknow );
+            }
+        }
+        return '';
+    }
+
+    _ungZip = ( array, offset ) => {
+        array = array.slice( offset );
+        return zlib.gunzipSync( array ).toString();
+    }
 
     _getProxy = async ( path, param ) => {
         let res = await this._sendGet( path, param );
@@ -436,15 +468,11 @@ class BiboxFuturesClientBase {
     };
 
     _buildSubSign = () => {
-        let strToSign = JSON.stringify( {
-            "apikey": this._apiKey,
-            "channel": PrivateSubscription.CHANNEL_PREFIX,
-            "event": "addChannel",
-        } );
-        return CryptoJS.HmacMD5( strToSign, this._secretKey ).toString();
+        let signStr = `{"apikey":"${ this._apiKey }","sub":"${ PrivateSubscription.CHANNEL_PREFIX }"}`;
+        return CryptoJS.HmacMD5( signStr, this._secretKey ).toString();
     };
 
-    _isArrMsg = ( str ) => str.startsWith( "[" );
+    _isObj = ( str ) => str.startsWith( "{" );
 
 }
 
@@ -1014,7 +1042,7 @@ class CandlestickSubscription extends Subscription {
     }
 
     _decode = ( obj ) => {
-        return JsonUtil.candlestickWrapper( obj );
+        return JsonUtil.candlestickEventWrapper( obj );
     };
 
     _onData = ( data ) => {
@@ -1028,7 +1056,7 @@ class CandlestickSubscription extends Subscription {
     };
 
     static buildChannelName = ( symbol, interval ) => {
-        return `bibox_sub_spot_${ symbol }_kline_${ interval }`;
+        return `${ symbol }_kline_${ interval }`;
     };
 
     getChannel = () => {
@@ -1037,10 +1065,7 @@ class CandlestickSubscription extends Subscription {
 
     toString() {
         return JSON.stringify( {
-            event: 'addChannel',
-            channel: this.getChannel(),
-            binary: 0,
-            ver: 8,
+            sub: this.getChannel(),
         } );
     }
 
@@ -1055,7 +1080,7 @@ class MarketPriceSubscription extends Subscription {
     }
 
     _decode = ( obj ) => {
-        return JsonUtil.marketPriceWrapper( obj );
+        return JsonUtil.marketPriceEventWrapper( obj );
     };
 
     _onData = ( data ) => {
@@ -1069,7 +1094,7 @@ class MarketPriceSubscription extends Subscription {
     };
 
     static buildChannelName = ( symbol ) => {
-        return `bibox_sub_spot_${ symbol }TAGPRICE_kline_1min`;
+        return `${ symbol }TAGPRICE_kline_1min`;
     };
 
     getChannel = () => {
@@ -1078,10 +1103,7 @@ class MarketPriceSubscription extends Subscription {
 
     toString() {
         return JSON.stringify( {
-            event: 'addChannel',
-            channel: this.getChannel(),
-            binary: 0,
-            ver: 8,
+            sub: this.getChannel(),
         } );
     }
 
@@ -1097,10 +1119,9 @@ class OrderBookSubscription extends Subscription {
         this._bids = {};
     }
 
-    _decode = ( objzip ) => {
-        let obj = JsonUtil.unzip( objzip );
+    _decode = ( obj ) => {
         if ( !obj.hasOwnProperty( "add" ) ) {
-            this._data = JsonUtil.orderBookWrapper( obj );
+            this._data = JsonUtil.orderBookEventWrapper( obj );
             this._asks = this._data.asks.reduce( ( res, item ) => {
                 res[item.price] = item;
                 return res;
@@ -1112,35 +1133,25 @@ class OrderBookSubscription extends Subscription {
         } else {
             if ( obj.add.asks ) {
                 obj.add.asks.forEach( item => {
-                    this._asks[item.price] = { price: item.price, amount: item.volume };
+                    this._asks[item.price] = { price: item[1], amount: item[0] };
                 } );
             }
             if ( obj.add.bids ) {
                 obj.add.bids.forEach( item => {
-                    this._bids[item.price] = { price: item.price, amount: item.volume };
+                    this._bids[item.price] = { price: item[1], amount: item[0] };
                 } );
             }
             if ( obj.del.asks ) {
                 obj.del.asks.forEach( item => {
-                    delete this._asks[item.price];
+                    delete this._asks[item[1]];
                 } );
             }
             if ( obj.del.bids ) {
                 obj.del.bids.forEach( item => {
-                    delete this._bids[item.price];
+                    delete this._bids[item[1]];
                 } );
             }
-            if ( obj.mod.asks ) {
-                obj.mod.asks.forEach( item => {
-                    this._asks[item.price] = { price: item.price, amount: item.volume };
-                } );
-            }
-            if ( obj.mod.bids ) {
-                obj.mod.bids.forEach( item => {
-                    this._bids[item.price] = { price: item.price, amount: item.volume };
-                } );
-            }
-            this._data.updateTime = obj.updateTime;
+            this._data.updateTime = obj.ut;
 
             this._data.asks = Object.values( this._asks ).sort( ( f, b ) => f.price - b.price );
             this._data.bids = Object.values( this._bids ).sort( ( f, b ) => b.price - f.price );
@@ -1158,7 +1169,7 @@ class OrderBookSubscription extends Subscription {
     };
 
     static buildChannelName = ( symbol ) => {
-        return `bibox_sub_spot_${ symbol }_depth`;
+        return `${ symbol }_depth`;
     };
 
     getChannel = () => {
@@ -1167,10 +1178,7 @@ class OrderBookSubscription extends Subscription {
 
     toString() {
         return JSON.stringify( {
-            event: 'addChannel',
-            channel: this.getChannel(),
-            binary: 0,
-            ver: 3,
+            sub: this.getChannel(),
         } );
     }
 
@@ -1184,9 +1192,15 @@ class TradeSubscription extends Subscription {
         this._data = [];
     }
 
-    _decode = ( objzip ) => {
-        let obj = JsonUtil.unzip( objzip );
-        return JsonUtil.tradeWrapper( obj );
+    _decode = ( obj ) => {
+        if ( obj.constructor === Array ) {
+            return JsonUtil.tradeEventWrapper( obj );
+        }else {
+            if ( obj.d && obj.d[0] ) {
+                return JsonUtil.tradeEventWrapper( obj.d[0], obj.pair );
+            }
+        }
+        return [];
     };
 
     _onData = ( data ) => {
@@ -1200,7 +1214,7 @@ class TradeSubscription extends Subscription {
     };
 
     static buildChannelName = ( symbol ) => {
-        return `bibox_sub_spot_${ symbol }_deals`;
+        return `${ symbol }_deals`;
     };
 
     getChannel = () => {
@@ -1209,9 +1223,7 @@ class TradeSubscription extends Subscription {
 
     toString() {
         return JSON.stringify( {
-            event: 'addChannel',
-            channel: this.getChannel(),
-            binary: 0,
+            sub: this.getChannel(),
         } );
     }
 
@@ -1226,7 +1238,7 @@ class TickerSubscription extends Subscription {
     }
 
     _decode = ( obj ) => {
-        return JsonUtil.tickerWrapper( obj );
+        return JsonUtil.tickerEventWrapper( obj );
     };
 
     _onData = ( data ) => {
@@ -1238,7 +1250,7 @@ class TickerSubscription extends Subscription {
     };
 
     static buildChannelName = ( symbol ) => {
-        return `bibox_sub_spot_${ symbol }_ticker`;
+        return `${ symbol }_ticker`;
     };
 
     getChannel = () => {
@@ -1247,9 +1259,7 @@ class TickerSubscription extends Subscription {
 
     toString() {
         return JSON.stringify( {
-            event: 'addChannel',
-            channel: this.getChannel(),
-            binary: 0,
+            sub: this.getChannel(),
         } );
     }
 
@@ -1257,7 +1267,7 @@ class TickerSubscription extends Subscription {
 
 class PrivateSubscription extends Subscription {
 
-    static CHANNEL_PREFIX = "bibox_sub_spot_ALL_ALL_login"
+    static CHANNEL_PREFIX = "ALL_ALL_login"
 
     constructor( client, listener ) {
         super( listener );
@@ -1275,7 +1285,6 @@ class PrivateSubscription extends Subscription {
         return JSON.stringify( {
             "apikey": this._client._apiKey,
             "channel": PrivateSubscription.CHANNEL_PREFIX,
-            "event": "addChannel",
             "sign": this._client._buildSubSign()
         } );
     }
@@ -1424,6 +1433,22 @@ class JsonUtil {
         return JSON.parse( buf );
     };
 
+    static candlestickEventWrapper = ( obj ) => {
+        if ( obj.length > 1 ) {
+            let item = obj[1];
+            return [ {
+                time: item[0],
+                open: item[1],
+                high: item[2],
+                low: item[3],
+                close: item[4],
+                volume: item[5]
+            } ];
+
+        }
+        return [];
+    };
+
     static candlestickWrapper = ( obj ) => {
         return obj.map( item => {
             return {
@@ -1435,6 +1460,28 @@ class JsonUtil {
                 volume: item.vol
             };
         } );
+    };
+
+    static orderBookEventWrapper = ( obj ) => {
+        let json = {
+            symbol: obj.pair,
+            updateTime: obj.ut,
+            asks: [],
+            bids: []
+        };
+        json.asks = obj.asks.map( item => {
+            return {
+                price: item[1],
+                amount: item[0],
+            };
+        } );
+        json.bids = obj.bids.map( item => {
+            return {
+                price: item[1],
+                amount: item[0],
+            };
+        } );
+        return json;
     };
 
     static orderBookWrapper = ( obj ) => {
@@ -1470,6 +1517,21 @@ class JsonUtil {
             };
         } );
     };
+
+    static marketPriceEventWrapper = ( obj ) => {
+        if ( obj.length > 1 ) {
+            let item = obj[1];
+            return [ {
+                time: item[0],
+                open: item[1],
+                high: item[2],
+                low: item[3],
+                close: item[4],
+            } ];
+
+        }
+        return [];
+    }
 
     static contractsWrapper = ( contract, fundingRate, symbolPrecision ) => {
         let symbolPrecisionMap = symbolPrecision.reduce( ( x, item ) => {
@@ -1651,6 +1713,27 @@ class JsonUtil {
         };
     };
 
+    static tradeEventWrapper = ( item, pair ) => {
+        if ( pair ) {
+            return [ {
+                symbol: pair,
+                side: ApiTradeSide.fromInteger( item[2] ),
+                price: item[0],
+                quantity: item[1],
+                time: item[3]
+            } ];
+        }
+
+        return [ {
+            symbol: item[0],
+            side: ApiTradeSide.fromInteger( item[3] ),
+            price: item[1],
+            quantity: item[2],
+            time: item[4]
+        } ];
+
+    };
+
     static tradeWrapper = ( obj ) => {
         return obj.map( item => {
             return {
@@ -1661,6 +1744,24 @@ class JsonUtil {
                 time: item.time
             };
         } );
+    };
+
+    static tickerEventWrapper = ( obj ) => {
+        return {
+            symbol: obj[0],
+            change: obj[11],
+            time: obj[12],
+            volume: obj[10],
+            price: obj[1],
+            priceInCNY: obj[3],
+            priceInUSD: obj[2],
+            high: obj[4],
+            low: obj[5],
+            bestAskPrice: obj[8],
+            bestAskQty: obj[9],
+            bestBidPrice: obj[6],
+            bestBidQty: obj[7]
+        };
     };
 
     static tickerWrapper = ( obj ) => {
