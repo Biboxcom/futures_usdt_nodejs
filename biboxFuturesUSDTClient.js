@@ -1790,7 +1790,7 @@ class JsonUtil {
             action: ApiTradeAction.fromOrderSide( obj.sd ),
             price: obj.dp,
             orderPrice: obj.p,
-            quantity: obj.eq,
+            quantity: obj.ep,
             isMaker: !!obj.im,
             time: obj.t,
             fee: {
