@@ -328,7 +328,29 @@ class BiboxFuturesClientBase {
         this._keepLive = setTimeout( () => {
             this._wss.ping( new Date().getTime() );
             this._loopPing();
-        }, 20000 );
+        }, 10000 );
+    };
+
+    _delayReconnect = ( ms = 3000 ) => {
+        const timer = setTimeout( () => {
+            this._reconnect();
+            clearTimeout( timer );
+        }, ms );
+    };
+
+    _reconnect = () => {
+        if ( this._wss ) {
+            let __wss = this._wss;
+            __wss.removeAllListeners();
+            __wss.on( "error", () => {} );
+            if ( __wss.readyState !== __wss.CONNECTING ) {
+                __wss.terminate();
+            }
+            clearTimeout( this._pingTimeout );
+            clearTimeout( this._keepLive );
+            this._wss = null;
+            this._initWss();
+        }
     };
 
     _initWss = () => {
@@ -341,11 +363,13 @@ class BiboxFuturesClientBase {
             } );
 
             this._wss.on( "close", () => {
-                clearTimeout( this._pingTimeout );
+                console.log( "close", e );
+                this._delayReconnect();
             } );
 
             this._wss.on( "error", ( err ) => {
                 console.log( "error", err );
+                this._delayReconnect();
             } );
 
             this._wss.on( "ping", () => {
